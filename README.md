@@ -189,12 +189,48 @@ MCP SDK (stdio transport)       →  protocol layer
 
 ## Compared to Alternatives
 
+### Overview
+
 | Solution | Platform | Scope | Docker Required | Controls Real Desktop |
 |---|---|---|---|---|
 | **This project** | **macOS** | **Full desktop** | **No** | **Yes** |
 | Anthropic Computer Use | Linux | Full desktop | Yes | No (virtual) |
 | MCPControl | Windows | Full desktop | No | Yes |
 | Playwright MCP | Cross-platform | Browser only | No | Partial |
+
+### vs. Cross-Platform Python MCP Servers
+
+There are cross-platform desktop control MCP servers built on PyAutoGUI, such as [computer-control-mcp](https://github.com/AB498/computer-control-mcp) and [mcp-desktop-controller](https://github.com/KumaVolt/mcp-desktop-controller). Here's how we compare:
+
+| Aspect | **This project** | **computer-control-mcp** | **mcp-desktop-controller** |
+|---|---|---|---|
+| Language | Node.js | Python | Python |
+| Backend | cliclick + osascript + screencapture | PyAutoGUI + RapidOCR + ONNX | PyAutoGUI + FastMCP |
+| Platform | macOS only | Cross-platform | Cross-platform |
+| OCR | No | **Yes** (RapidOCR) | No |
+| IME bypass | **Yes** (`direct` mode) | No | No |
+| Focus management | **Yes** (`app` param auto-refocus) | No | No |
+| macOS Shortcuts | **Yes** (`run_shortcut`) | No | No |
+| AppleScript integration | **Yes** (key codes, window control) | No | No |
+| Install | npm + `brew install cliclick` | pip (heavy deps: ONNX runtime) | pip |
+
+### Why we built a separate macOS-native solution
+
+**1. Focus-stealing prevention** — When AI clients (Claude Code, Codex CLI, etc.) ask for permission approval in the terminal, focus shifts away from the target app. Subsequent mouse clicks and keystrokes land in the wrong window. Our `app` parameter calls `ensureAppFocus()` before every action. PyAutoGUI-based solutions don't address this at all.
+
+**2. Input method (IME) handling** — `direct` mode writes text via AppleScript `set text`, completely bypassing the input method. For CJK IME users, PyAutoGUI's `typewrite` only supports ASCII, and `keystroke` mode triggers IME candidate popups on spaces and punctuation.
+
+**3. Deeper macOS integration** — AppleScript `key code` supports all macOS key codes + modifier combos without being limited to PyAutoGUI's key name mapping. `run_shortcut` can invoke any macOS Shortcuts workflow for system-level automation. Window management uses `AXRaise` via System Events, which is more reliable than PyAutoGUI's window operations on macOS.
+
+**4. Lightweight** — Only depends on cliclick (a single brew package) plus built-in macOS tools (osascript, screencapture). No Python runtime, no ONNX, no heavy dependency chain.
+
+### When to choose a cross-platform solution instead
+
+- You need to control Windows, Linux, and macOS with a single tool
+- You need OCR to locate on-screen elements by text (computer-control-mcp has this)
+- You don't use a CJK input method and focus-stealing isn't an issue for your workflow
+
+**TL;DR:** Less portable than cross-platform alternatives, but significantly better experience on macOS — especially with CJK input methods and approval-based AI clients.
 
 ## License
 

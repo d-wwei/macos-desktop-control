@@ -189,12 +189,48 @@ MCP SDK（stdio 传输）           →  协议层
 
 ## 方案对比
 
+### 总览
+
 | 方案 | 平台 | 控制范围 | 需要 Docker | 控制真实桌面 |
 |---|---|---|---|---|
 | **本项目** | **macOS** | **全桌面** | **否** | **是** |
 | Anthropic Computer Use | Linux | 全桌面 | 是 | 否（虚拟桌面） |
 | MCPControl | Windows | 全桌面 | 否 | 是 |
 | Playwright MCP | 跨平台 | 仅浏览器 | 否 | 部分 |
+
+### 与跨平台 Python MCP Server 的对比
+
+市面上有基于 PyAutoGUI 的跨平台桌面控制 MCP Server，如 [computer-control-mcp](https://github.com/AB498/computer-control-mcp) 和 [mcp-desktop-controller](https://github.com/KumaVolt/mcp-desktop-controller)。以下是详细对比：
+
+| 维度 | **本项目** | **computer-control-mcp** | **mcp-desktop-controller** |
+|---|---|---|---|
+| 语言 | Node.js | Python | Python |
+| 底层工具 | cliclick + osascript + screencapture | PyAutoGUI + RapidOCR + ONNX | PyAutoGUI + FastMCP |
+| 平台 | 仅 macOS | 跨平台 | 跨平台 |
+| OCR | 无 | **有**（RapidOCR） | 无 |
+| 输入法绕过 | **有**（`direct` 模式） | 无 | 无 |
+| 焦点管理 | **有**（`app` 参数自动回焦） | 无 | 无 |
+| macOS 快捷指令 | **有**（`run_shortcut`） | 无 | 无 |
+| AppleScript 深度集成 | **有**（key code、窗口控制） | 无 | 无 |
+| 安装方式 | npm + `brew install cliclick` | pip（依赖较重，含 ONNX） | pip |
+
+### 为什么单独开发 macOS 原生方案
+
+**1. 防止焦点被抢** — AI 客户端（Claude Code、Codex CLI 等）在终端请求权限审批时，焦点会切到终端窗口，后续的鼠标点击和键盘输入全部打到错误窗口。我们的 `app` 参数在每次操作前调用 `ensureAppFocus()` 自动切回目标应用。PyAutoGUI 方案完全没有处理这个问题。
+
+**2. 输入法处理** — `direct` 模式通过 AppleScript `set text` 直接写入文本，完全绕过输入法。对于使用中文/日文输入法的用户，PyAutoGUI 的 `typewrite` 只支持 ASCII，`keystroke` 模式会触发候选词弹窗。
+
+**3. 更深的 macOS 集成** — AppleScript `key code` 支持所有 macOS 键码 + 修饰键组合，不受 PyAutoGUI 键名映射限制。`run_shortcut` 可以调用任意 macOS 快捷指令，串联系统级自动化。窗口管理使用 System Events 的 `AXRaise`，比 PyAutoGUI 在 macOS 上的窗口操作更可靠。
+
+**4. 轻量** — 只依赖 cliclick（一个 brew 包）+ 系统自带的 osascript 和 screencapture。无需 Python 运行环境、ONNX 推理引擎等重量级依赖。
+
+### 什么时候该选跨平台方案
+
+- 你需要同时控制 Windows、Linux 和 macOS
+- 你需要 OCR 识别屏幕上的文字来定位元素（computer-control-mcp 有这个能力）
+- 你不使用中文/日文输入法，且焦点被抢对你的工作流影响不大
+
+**一句话总结：** 跨平台通用性不如他们，macOS 上的实际体验比他们好 — 尤其是使用中文输入法和需要审批的 AI 客户端时。
 
 ## 许可证
 
