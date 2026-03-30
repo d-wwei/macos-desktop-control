@@ -2,62 +2,159 @@
 
 [中文文档](./README.zh-CN.md)
 
-MCP Server for **native macOS desktop automation** — screenshot, mouse, keyboard, window management, and more.
+MCP server for native macOS desktop automation — screen, mouse, keyboard, window management, and mobile simulators.
 
-No Docker, no virtual display. Controls your **actual desktop**.
+No Docker. No virtual display. Controls your actual Mac desktop. AI operates in the background or the foreground — you choose.
 
-Works with any MCP-compatible client: Claude Code, Claude Desktop, OpenAI Codex CLI, Gemini CLI, Cursor, VS Code Copilot, and more.
+## What's New in v3.0
 
-## Features
+Two operation modes. 30 tools (up from 13). Optional iOS/Android simulator control.
 
-| Category | Capabilities |
-|---|---|
-| **Screen** | Full screen / region screenshot, display info |
-| **Mouse** | Click (left/right/double/triple), move, drag, scroll |
-| **Keyboard** | Type text (3 modes), key combos with modifiers |
-| **Window** | List all windows, focus by app/title, open apps |
-| **System** | Run macOS Shortcuts workflows |
+| Mode | How It Works | User Experience |
+|------|-------------|-----------------|
+| **Foreground** | cliclick + AppleScript (same as v2) | You watch the AI operate your screen |
+| **Background** | CGEvent API via `CGEventPostToPid` | AI works in a target window — your focus stays untouched |
 
-**Key highlights:**
+Add `target: { app: "Safari" }` to any supported tool. Coordinates become window-relative. The AI never steals your foreground.
 
-- `app` parameter on click/type/keypress — **auto-refocuses** the target app before acting (solves focus-stealing when approving tool calls)
-- `type_text` with `mode: "direct"` — writes content via AppleScript, **completely bypasses input method (IME)**
-- `key_press` supports **any key + modifier combo** via AppleScript key codes (not limited to cliclick's named keys)
-
-## Prerequisites
-
-- macOS (tested on Sequoia 15.x)
-- Node.js 18+
-- [cliclick](https://github.com/BlueM/cliclick):
-  ```bash
-  brew install cliclick
-  ```
-- **Accessibility permission** — grant your terminal app in:
-  **System Settings → Privacy & Security → Accessibility**
-
-## Install
+## Quick Start
 
 ```bash
+# 1. Install cliclick
+brew install cliclick
+
+# 2. Clone and install
 git clone https://github.com/d-wwei/macos-desktop-control.git
 cd macos-desktop-control
 npm install
+
+# 3. Add to your MCP client (example: Claude Code)
+claude mcp add macos-desktop-control -- node /path/to/macos-desktop-control/src/index.js
 ```
+
+Grant **Accessibility permission** to your terminal: System Settings → Privacy & Security → Accessibility.
+
+## Features
+
+### Foreground Mode (default)
+
+All original v2 capabilities, unchanged.
+
+- **Screen capture** — full screen, region, or specific display
+- **Mouse** — click (left/right/double/triple), move, drag, scroll, with modifier keys
+- **Keyboard** — three typing modes (keystroke, cliclick, direct IME bypass), any key combo via AppleScript key codes
+- **Window management** — list windows, focus by app/title, open apps
+- **System** — run macOS Shortcuts workflows
+- **Focus protection** — `app` parameter auto-refocuses the target before each action
+
+### Background Mode (`target` parameter)
+
+Add `target: { app: "AppName", title?: "WindowTitle" }` to operate without stealing focus.
+
+| Tool | Background Behavior |
+|------|-------------------|
+| `screenshot` | Captures the target window via `screencapture -l<windowId>` |
+| `click` | Sends CGEvent mouse events directly to the target PID |
+| `type_text` | Pastes text via CGEvent Cmd+V to the target PID (saves/restores clipboard) |
+| `key_press` | Sends CGEvent keyboard events to the target PID |
+| `scroll` | Sends CGEvent scroll wheel events to the target PID |
+| `drag` | Flash technique: briefly activates target → drags → restores your foreground app |
+| `open_app` | Launches via `open -g` (background, no focus steal) |
+| `list_windows` | Returns CGWindowID + PID for each window (used internally for targeting) |
+
+When `target` is set, x/y coordinates are **window-relative** — (0,0) is the top-left corner of the target window. The server converts to screen-absolute coordinates internally.
+
+### iOS Simulator (requires Xcode)
+
+Tools register automatically when `xcrun simctl` is detected.
+
+| Tool | Function |
+|------|----------|
+| `sim_list_devices` | List simulators and their status |
+| `sim_boot` / `sim_shutdown` | Start or stop a simulator |
+| `sim_screenshot` | Capture at native device resolution |
+| `sim_tap` | Tap at iOS-space coordinates (auto-mapped to Simulator window) |
+| `sim_swipe` | Swipe gesture with duration control |
+| `sim_type` | Type text into the simulator |
+| `sim_open_url` | Open a URL on the simulator |
+| `sim_install_app` | Install a .app bundle |
+
+### Android Emulator (requires adb)
+
+Tools register automatically when `adb` is detected. All operations are fully background — adb never steals focus.
+
+| Tool | Function |
+|------|----------|
+| `emu_list_devices` | List connected devices/emulators |
+| `emu_screenshot` | Capture via `adb exec-out screencap` |
+| `emu_tap` | Tap at device coordinates |
+| `emu_swipe` | Swipe with duration control |
+| `emu_type` | Type text |
+| `emu_key` | Send keyevent (HOME, BACK, ENTER, etc.) |
+| `emu_open_url` | Open a URL via intent |
+| `emu_install_app` | Install an APK |
+
+## Usage Examples
+
+### Background screenshot of a specific app
+
+```json
+{ "target": { "app": "Safari" } }
+```
+
+Captures Safari's window even if it's behind other windows. Your foreground stays untouched.
+
+### Background click in a window
+
+```json
+{ "x": 100, "y": 200, "target": { "app": "Safari", "title": "GitHub" } }
+```
+
+Clicks at position (100, 200) relative to the Safari window titled "GitHub". No focus change.
+
+### Background text input
+
+```json
+{ "text": "hello world", "target": { "app": "Notes" } }
+```
+
+Types into Notes via clipboard paste (CGEvent Cmd+V). Clipboard is saved and restored.
+
+### Focus-safe foreground operation
+
+```json
+{ "text": "hello", "app": "TextEdit", "mode": "direct" }
+```
+
+Writes text directly via AppleScript — bypasses input method entirely.
+
+## Prerequisites
+
+- macOS (tested on Sequoia 15.x and Tahoe 26.x)
+- Node.js 18+
+- [cliclick](https://github.com/BlueM/cliclick): `brew install cliclick`
+- **Accessibility permission** for your terminal app
+- Optional: Xcode (for iOS simulator tools)
+- Optional: Android SDK with adb (for Android emulator tools)
 
 ## Client Configuration
 
-This server uses **stdio transport**, the most universally supported MCP transport. Configuration is nearly identical across all clients.
+Uses **stdio transport**. Configuration is the same across all MCP clients.
 
-### Claude Code
+<details>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 # Project scope
 claude mcp add macos-desktop-control -- node /path/to/macos-desktop-control/src/index.js
 
-# Global scope (available in all projects)
+# Global scope
 claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-control/src/index.js
 ```
+</details>
 
-### Claude Desktop
+<details>
+<summary><b>Claude Desktop</b></summary>
 
 `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -71,10 +168,12 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
   }
 }
 ```
+</details>
 
-### OpenAI Codex CLI
+<details>
+<summary><b>OpenAI Codex CLI</b></summary>
 
-`.codex/mcp.json` or pass via `codex --mcp-config mcp.json`:
+`.codex/mcp.json`:
 
 ```json
 {
@@ -86,8 +185,10 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
   }
 }
 ```
+</details>
 
-### Gemini CLI
+<details>
+<summary><b>Gemini CLI</b></summary>
 
 `~/.gemini/settings.json`:
 
@@ -101,8 +202,10 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
   }
 }
 ```
+</details>
 
-### Cursor
+<details>
+<summary><b>Cursor</b></summary>
 
 `.cursor/mcp.json`:
 
@@ -116,8 +219,10 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
   }
 }
 ```
+</details>
 
-### VS Code (GitHub Copilot)
+<details>
+<summary><b>VS Code (GitHub Copilot)</b></summary>
 
 `.vscode/mcp.json`:
 
@@ -131,106 +236,58 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
   }
 }
 ```
-
-## Tools Reference
-
-| Tool | Description | Key Params |
-|---|---|---|
-| `screenshot` | Capture full screen or region | `region`, `display` |
-| `click` | Click at coordinates | `x`, `y`, `button`, `clicks`, `modifiers`, `app` |
-| `move_mouse` | Move cursor | `x`, `y` |
-| `drag` | Drag between positions | `fromX`, `fromY`, `toX`, `toY` |
-| `type_text` | Type text (3 modes) | `text`, `app`, `mode`, `switchToEnglish` |
-| `key_press` | Press key combo | `key`, `modifiers`, `app` |
-| `scroll` | Scroll in any direction | `direction`, `amount`, `x`, `y` |
-| `get_mouse_position` | Get cursor position | — |
-| `get_screen_size` | Get display dimensions | — |
-| `open_app` | Open/activate app | `app` |
-| `list_windows` | List visible windows | — |
-| `focus_window` | Focus specific window | `app`, `title` |
-| `run_shortcut` | Run macOS Shortcut | `name`, `input` |
-
-## Usage Tips
-
-### Focus Stealing Prevention
-
-When your AI client asks for permission approval in the terminal, focus shifts away from the target app. Use the `app` parameter to auto-refocus:
-
-```json
-{ "text": "hello", "app": "TextEdit" }
-```
-
-### Input Method (IME) Handling
-
-If you use a CJK input method, `keystroke` mode may trigger IME candidates. Two solutions:
-
-| Solution | How |
-|---|---|
-| **Direct mode** | `mode: "direct"` — bypasses IME entirely (TextEdit, Notes, etc.) |
-| **Switch language** | `switchToEnglish: true` — presses Caps Lock before typing |
-
-### type_text Modes
-
-| Mode | Mechanism | IME Safe | Works With |
-|---|---|---|---|
-| `keystroke` (default) | System Events `keystroke` | No | Any app |
-| `cliclick` | cliclick `t:` command | No | Any app |
-| `direct` | AppleScript `set text` | **Yes** | TextEdit, Notes, etc. |
+</details>
 
 ## Architecture
 
 ```
-screencapture (macOS built-in)  →  screenshot, get_screen_size
-cliclick (brew)                 →  click, move_mouse, drag, scroll, get_mouse_position
-osascript / System Events       →  type_text, key_press, open_app, list_windows, focus_window
-shortcuts CLI (macOS built-in)  →  run_shortcut
-MCP SDK (stdio transport)       →  protocol layer
+                          ┌─────────────────────────────────┐
+                          │   MCP Server (stdio transport)  │
+                          └──────────┬──────────────────────┘
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              │                      │                      │
+     Foreground Mode          Background Mode        Simulator Mode
+              │                      │                      │
+   ┌──────────┴──────────┐  ┌───────┴────────┐   ┌────────┴────────┐
+   │ cliclick (mouse)    │  │ CGEvent API    │   │ xcrun simctl    │
+   │ osascript (keyboard)│  │ via JXA bridge │   │ (iOS)           │
+   │ screencapture       │  │ CGEventPost-   │   │                 │
+   │ shortcuts CLI       │  │   ToPid(pid)   │   │ adb             │
+   └─────────────────────┘  │ screencapture  │   │ (Android)       │
+                             │   -l<windowId> │   └─────────────────┘
+                             └────────────────┘
 ```
+
+**Background mode internals:**
+1. `CGWindowListCopyWindowInfo` via JXA enumerates windows with CGWindowID, PID, and bounds
+2. Window-relative coordinates are converted to screen-absolute using bounds
+3. `CGEventPostToPid` sends mouse/keyboard/scroll events directly to the target process
+4. `screencapture -l<windowId>` captures a specific window without requiring focus
 
 ## Compared to Alternatives
 
-### Overview
+| Solution | Platform | Background Mode | Simulator Support | Real Desktop |
+|----------|----------|----------------|-------------------|-------------|
+| **This project** | **macOS** | **Yes (CGEvent)** | **iOS + Android** | **Yes** |
+| Anthropic Computer Use | Linux | No | No | No (virtual) |
+| MCPControl | Windows | No | No | Yes |
+| Playwright MCP | Cross-platform | Partial | No | Browser only |
+| PyAutoGUI MCP servers | Cross-platform | No | No | Yes |
 
-| Solution | Platform | Scope | Docker Required | Controls Real Desktop |
-|---|---|---|---|---|
-| **This project** | **macOS** | **Full desktop** | **No** | **Yes** |
-| Anthropic Computer Use | Linux | Full desktop | Yes | No (virtual) |
-| MCPControl | Windows | Full desktop | No | Yes |
-| Playwright MCP | Cross-platform | Browser only | No | Partial |
+### Why macOS-native
 
-### vs. Cross-Platform Python MCP Servers
+- **Background operation** — CGEvent API posts events to a target PID without touching focus. PyAutoGUI and cliclick both require the window to be foreground.
+- **Focus-stealing prevention** — `app` parameter + `ensureAppFocus()` handles the approval-dialog problem that all MCP clients share.
+- **IME bypass** — `direct` mode writes text through AppleScript, skipping the input method entirely. PyAutoGUI's `typewrite` only handles ASCII.
+- **Simulator integration** — iOS and Android simulators controlled through the same MCP interface. No separate tools needed.
+- **Lightweight** — cliclick (one brew package) + built-in macOS tools. No Python runtime, no ONNX, no heavy dependencies.
 
-There are cross-platform desktop control MCP servers built on PyAutoGUI, such as [computer-control-mcp](https://github.com/AB498/computer-control-mcp) and [mcp-desktop-controller](https://github.com/KumaVolt/mcp-desktop-controller). Here's how we compare:
+### When to choose a cross-platform solution
 
-| Aspect | **This project** | **computer-control-mcp** | **mcp-desktop-controller** |
-|---|---|---|---|
-| Language | Node.js | Python | Python |
-| Backend | cliclick + osascript + screencapture | PyAutoGUI + RapidOCR + ONNX | PyAutoGUI + FastMCP |
-| Platform | macOS only | Cross-platform | Cross-platform |
-| OCR | No | **Yes** (RapidOCR) | No |
-| IME bypass | **Yes** (`direct` mode) | No | No |
-| Focus management | **Yes** (`app` param auto-refocus) | No | No |
-| macOS Shortcuts | **Yes** (`run_shortcut`) | No | No |
-| AppleScript integration | **Yes** (key codes, window control) | No | No |
-| Install | npm + `brew install cliclick` | pip (heavy deps: ONNX runtime) | pip |
-
-### Why we built a separate macOS-native solution
-
-**1. Focus-stealing prevention** — When AI clients (Claude Code, Codex CLI, etc.) ask for permission approval in the terminal, focus shifts away from the target app. Subsequent mouse clicks and keystrokes land in the wrong window. Our `app` parameter calls `ensureAppFocus()` before every action. PyAutoGUI-based solutions don't address this at all.
-
-**2. Input method (IME) handling** — `direct` mode writes text via AppleScript `set text`, completely bypassing the input method. For CJK IME users, PyAutoGUI's `typewrite` only supports ASCII, and `keystroke` mode triggers IME candidate popups on spaces and punctuation.
-
-**3. Deeper macOS integration** — AppleScript `key code` supports all macOS key codes + modifier combos without being limited to PyAutoGUI's key name mapping. `run_shortcut` can invoke any macOS Shortcuts workflow for system-level automation. Window management uses `AXRaise` via System Events, which is more reliable than PyAutoGUI's window operations on macOS.
-
-**4. Lightweight** — Only depends on cliclick (a single brew package) plus built-in macOS tools (osascript, screencapture). No Python runtime, no ONNX, no heavy dependency chain.
-
-### When to choose a cross-platform solution instead
-
-- You need to control Windows, Linux, and macOS with a single tool
-- You need OCR to locate on-screen elements by text (computer-control-mcp has this)
-- You don't use a CJK input method and focus-stealing isn't an issue for your workflow
-
-**TL;DR:** Less portable than cross-platform alternatives, but significantly better experience on macOS — especially with CJK input methods and approval-based AI clients.
+- You need Windows or Linux support
+- You need OCR-based element detection
+- Background operation is not a requirement for your workflow
 
 ## License
 
