@@ -289,6 +289,30 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
 - 你需要 OCR 识别屏幕文字来定位元素
 - 台后操作不是你的刚需
 
+## 更新管理
+
+本项目集成了 [update-kit](https://github.com/d-wwei/update-kit)，提供策略控制、验证和回滚能力的更新编排。
+
+检查更新：
+
+```bash
+npx update-kit check --cwd /path/to/macos-desktop-control --json
+```
+
+执行更新（git pull + 语法验证）：
+
+```bash
+npx update-kit apply --cwd /path/to/macos-desktop-control
+```
+
+出问题时回滚：
+
+```bash
+npx update-kit rollback --cwd /path/to/macos-desktop-control
+```
+
+配置文件为 `update.config.json`。状态和审计日志存储在 `.update-kit/`（已加入 gitignore）。
+
 ## 许可证
 
 MIT

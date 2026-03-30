@@ -289,6 +289,30 @@ claude mcp add macos-desktop-control -s user -- node /path/to/macos-desktop-cont
 - You need OCR-based element detection
 - Background operation is not a requirement for your workflow
 
+## Update Management
+
+This project integrates [update-kit](https://github.com/d-wwei/update-kit) for update orchestration with policy control, verification, and rollback.
+
+Check for updates:
+
+```bash
+npx update-kit check --cwd /path/to/macos-desktop-control --json
+```
+
+Apply an update (git pull + syntax verification):
+
+```bash
+npx update-kit apply --cwd /path/to/macos-desktop-control
+```
+
+Rollback if something goes wrong:
+
+```bash
+npx update-kit rollback --cwd /path/to/macos-desktop-control
+```
+
+Configuration lives in `update.config.json`. State and audit logs are stored in `.update-kit/` (gitignored).
+
 ## License
 
 MIT
