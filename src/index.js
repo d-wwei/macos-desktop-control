@@ -5,9 +5,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFile, exec } from "child_process";
 import { promisify } from "util";
-import { readFile, writeFile, unlink } from "fs/promises";
+import { readFile, writeFile, unlink, mkdir, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { existsSync } from "fs";
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -37,6 +38,144 @@ function tempPath(ext = "png") {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ============================================================
+// Helpers: Image Compression & Tiling
+// ============================================================
+
+const COMPRESSION_PRESETS = {
+  none:   { maxWidth: null, quality: 100, format: "png" },
+  low:    { maxWidth: 2048, quality: 85,  format: "jpeg" },
+  medium: { maxWidth: 1280, quality: 70,  format: "jpeg" },
+  high:   { maxWidth: 800,  quality: 50,  format: "jpeg" },
+};
+
+const compressionSchema = z.enum(["none", "low", "medium", "high"]).default("medium")
+  .describe("Compression preset: none (raw PNG), low (2048px/q85), medium (1280px/q70, default), high (800px/q50)");
+const maxWidthSchema = z.number().min(100).optional()
+  .describe("Override preset max width (px). Image is scaled down if wider, never upscaled.");
+const qualitySchema = z.number().min(1).max(100).optional()
+  .describe("Override preset JPEG/WebP quality (1-100).");
+const formatSchema = z.enum(["jpeg", "png", "webp"]).optional()
+  .describe("Override preset output format.");
+
+// In-memory tile store: { [tileId]: { dir, tiles, timer } }
+const tileStore = {};
+const TILE_TTL_MS = 120_000; // 2 minutes
+
+function resolveCompression({ compression = "medium", maxWidth, quality, format }) {
+  const preset = COMPRESSION_PRESETS[compression] || COMPRESSION_PRESETS.medium;
+  return {
+    maxWidth: maxWidth ?? preset.maxWidth,
+    quality: quality ?? preset.quality,
+    format: format ?? preset.format,
+  };
+}
+
+async function getImageWidth(filePath) {
+  const { stdout } = await execFileAsync("sips", ["-g", "pixelWidth", filePath]);
+  const match = stdout.match(/pixelWidth:\s*(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+async function compressImage(inputPath, opts) {
+  const { maxWidth, quality, format } = opts;
+
+  // If format is png and no resizing needed, return as-is
+  if (format === "png" && !maxWidth) {
+    const data = await readFile(inputPath);
+    return { data, mimeType: "image/png" };
+  }
+
+  const ext = format === "jpeg" ? "jpg" : format;
+  const outPath = inputPath.replace(/\.[^.]+$/, `_compressed.${ext}`);
+
+  // Build sips command
+  const args = [];
+
+  // Resize if needed (never upscale)
+  if (maxWidth) {
+    const currentWidth = await getImageWidth(inputPath);
+    if (currentWidth && currentWidth > maxWidth) {
+      args.push("--resampleWidth", String(maxWidth));
+    }
+  }
+
+  // Format conversion
+  const sipsFormat = format === "jpeg" ? "jpeg" : format === "webp" ? "com.google.webp" : "png";
+  args.push("-s", "format", sipsFormat);
+
+  // Quality (for jpeg/webp)
+  if (format !== "png") {
+    args.push("-s", "formatOptions", String(quality));
+  }
+
+  args.push(inputPath, "--out", outPath);
+  await execFileAsync("sips", args);
+
+  const data = await readFile(outPath);
+  await unlink(outPath).catch(() => {});
+
+  const mimeMap = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+  return { data, mimeType: mimeMap[format] || "image/png" };
+}
+
+async function createTiles(inputPath, rows, cols) {
+  const tileId = `tiles-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const tileDir = join(tmpdir(), `mcp-${tileId}`);
+  await mkdir(tileDir, { recursive: true });
+
+  // Get image dimensions
+  const { stdout } = await execFileAsync("sips", ["-g", "pixelWidth", "-g", "pixelHeight", inputPath]);
+  const wMatch = stdout.match(/pixelWidth:\s*(\d+)/);
+  const hMatch = stdout.match(/pixelHeight:\s*(\d+)/);
+  const imgW = wMatch ? parseInt(wMatch[1], 10) : 1920;
+  const imgH = hMatch ? parseInt(hMatch[1], 10) : 1080;
+
+  const tileW = Math.ceil(imgW / cols);
+  const tileH = Math.ceil(imgH / rows);
+
+  const tiles = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const index = r * cols + c;
+      const offsetX = c * tileW;
+      const offsetY = r * tileH;
+      const actualW = Math.min(tileW, imgW - offsetX);
+      const actualH = Math.min(tileH, imgH - offsetY);
+      const tilePath = join(tileDir, `tile_${index}.png`);
+
+      // sips crop: first pad/crop to size, then offset
+      // Strategy: copy full image, then crop with extract
+      await execFileAsync("sips", [
+        "-c", String(imgH), String(imgW),  // ensure no padding issues
+        "--cropOffset", String(offsetY), String(offsetX),
+        "-c", String(actualH), String(actualW),
+        inputPath, "--out", tilePath,
+      ]);
+
+      tiles.push({ index, row: r, col: c, width: actualW, height: actualH, path: tilePath });
+    }
+  }
+
+  // Schedule cleanup
+  const timer = setTimeout(async () => {
+    await rm(tileDir, { recursive: true, force: true }).catch(() => {});
+    delete tileStore[tileId];
+  }, TILE_TTL_MS);
+
+  tileStore[tileId] = { dir: tileDir, tiles, timer, originalSize: { width: imgW, height: imgH }, tileSize: { width: tileW, height: tileH } };
+
+  return {
+    tileId,
+    rows,
+    cols,
+    totalTiles: tiles.length,
+    originalSize: { width: imgW, height: imgH },
+    tileSize: { width: tileW, height: tileH },
+    tiles: tiles.map(t => ({ index: t.index, row: t.row, col: t.col, width: t.width, height: t.height })),
+  };
 }
 
 // ============================================================
@@ -313,7 +452,7 @@ const charToKeyCode = {
 
 const server = new McpServer({
   name: "macos-desktop-control",
-  version: "3.0.0",
+  version: "3.1.0",
 });
 
 // ============================================================
@@ -321,8 +460,10 @@ const server = new McpServer({
 // ============================================================
 server.tool(
   "screenshot",
-  "Capture a screenshot of the entire screen, a region, or a specific window (background mode). Returns base64 PNG.\n" +
-    "Use 'target' to capture a specific app's window without stealing focus.",
+  "Capture a screenshot of the entire screen, a region, or a specific window (background mode).\n" +
+    "Use 'target' to capture a specific app's window without stealing focus.\n" +
+    "Compression presets: none (raw PNG), low (2048px/q85), medium (1280px/q70, DEFAULT), high (800px/q50).\n" +
+    "Use 'tile' to split a high-res screenshot into a grid; fetch individual tiles with screenshot_tile.",
   {
     region: z.object({
       x: z.number().describe("Top-left x coordinate"),
@@ -332,31 +473,88 @@ server.tool(
     }).optional().describe("Optional region to capture. Omit for full screen."),
     display: z.number().optional().describe("Display number (1 = main). Omit for main display."),
     target: targetSchema,
+    compression: compressionSchema,
+    maxWidth: maxWidthSchema,
+    quality: qualitySchema,
+    format: formatSchema,
+    tile: z.object({
+      rows: z.number().min(1).max(4).describe("Number of rows (1-4)"),
+      cols: z.number().min(1).max(4).describe("Number of columns (1-4)"),
+    }).optional().describe("Enable tile mode: splits screenshot into a grid. Returns a manifest; use screenshot_tile to fetch individual tiles."),
   },
-  async ({ region, display, target }) => {
+  async ({ region, display, target, compression, maxWidth, quality, format, tile }) => {
     const filePath = tempPath("png");
     try {
+      // Step 1: Capture raw screenshot
       if (target) {
-        // Background mode: capture specific window by CGWindowID
         const win = await getWindowInfo(target.app, target.title);
         await execFileAsync("screencapture", ["-x", "-o", `-l${win.windowId}`, filePath]);
       } else {
-        // Foreground mode: existing behavior
         const args = ["-x"];
         if (region) args.push("-R", `${region.x},${region.y},${region.w},${region.h}`);
         if (display) args.push("-D", String(display));
         args.push(filePath);
         await execFileAsync("screencapture", args);
       }
-      const imageData = await readFile(filePath);
-      const base64 = imageData.toString("base64");
+
+      // Step 2: Tile mode — return manifest, no image data
+      if (tile) {
+        const manifest = await createTiles(filePath, tile.rows, tile.cols);
+        await unlink(filePath).catch(() => {});
+        return {
+          content: [{ type: "text", text: JSON.stringify(manifest, null, 2) }],
+        };
+      }
+
+      // Step 3: Compress and return
+      const opts = resolveCompression({ compression, maxWidth, quality, format });
+      const { data, mimeType } = await compressImage(filePath, opts);
+      const base64 = data.toString("base64");
       await unlink(filePath).catch(() => {});
       return {
-        content: [{ type: "image", data: base64, mimeType: "image/png" }],
+        content: [{ type: "image", data: base64, mimeType }],
       };
     } catch (err) {
       await unlink(filePath).catch(() => {});
       return { content: [{ type: "text", text: `Screenshot failed: ${err.message}` }] };
+    }
+  }
+);
+
+// ============================================================
+// Tool: screenshot_tile
+// ============================================================
+server.tool(
+  "screenshot_tile",
+  "Fetch a single tile from a tiled screenshot. Use after calling screenshot with tile mode.\n" +
+    "Each tile is compressed individually before returning.",
+  {
+    id: z.string().describe("Tile manifest ID returned by screenshot with tile mode"),
+    index: z.number().min(0).describe("Tile index (0-based, row-major order)"),
+    compression: compressionSchema,
+    maxWidth: maxWidthSchema,
+    quality: qualitySchema,
+    format: formatSchema,
+  },
+  async ({ id, index, compression, maxWidth, quality, format }) => {
+    try {
+      const entry = tileStore[id];
+      if (!entry) {
+        return { content: [{ type: "text", text: `Tile set "${id}" not found or expired (tiles expire after ${TILE_TTL_MS / 1000}s).` }] };
+      }
+      const tileInfo = entry.tiles[index];
+      if (!tileInfo) {
+        return { content: [{ type: "text", text: `Tile index ${index} out of range (0-${entry.tiles.length - 1}).` }] };
+      }
+
+      const opts = resolveCompression({ compression, maxWidth, quality, format });
+      const { data, mimeType } = await compressImage(tileInfo.path, opts);
+      const base64 = data.toString("base64");
+      return {
+        content: [{ type: "image", data: base64, mimeType }],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `screenshot_tile failed: ${err.message}` }] };
     }
   }
 );
@@ -913,16 +1111,24 @@ async function registerSimulatorTools() {
 
   server.tool(
     "sim_screenshot",
-    "Take a screenshot of an iOS simulator. Returns base64 PNG at native device resolution.",
-    { deviceId: z.string().describe("Device UDID (use 'booted' for the active simulator)") },
-    async ({ deviceId }) => {
+    "Take a screenshot of an iOS simulator.\n" +
+      "Compression presets: none (raw PNG), low (2048px/q85), medium (1280px/q70, DEFAULT), high (800px/q50).",
+    {
+      deviceId: z.string().describe("Device UDID (use 'booted' for the active simulator)"),
+      compression: compressionSchema,
+      maxWidth: maxWidthSchema,
+      quality: qualitySchema,
+      format: formatSchema,
+    },
+    async ({ deviceId, compression, maxWidth, quality, format }) => {
       const filePath = tempPath("png");
       try {
         await execAsync(`xcrun simctl io "${deviceId}" screenshot "${filePath}"`);
-        const imageData = await readFile(filePath);
-        const base64 = imageData.toString("base64");
+        const opts = resolveCompression({ compression, maxWidth, quality, format });
+        const { data, mimeType } = await compressImage(filePath, opts);
+        const base64 = data.toString("base64");
         await unlink(filePath).catch(() => {});
-        return { content: [{ type: "image", data: base64, mimeType: "image/png" }] };
+        return { content: [{ type: "image", data: base64, mimeType }] };
       } catch (err) {
         await unlink(filePath).catch(() => {});
         return { content: [{ type: "text", text: `sim_screenshot failed: ${err.message}` }] };
@@ -1095,19 +1301,25 @@ async function registerEmulatorTools() {
 
   server.tool(
     "emu_screenshot",
-    "Take a screenshot of an Android emulator. Returns base64 PNG.",
+    "Take a screenshot of an Android emulator.\n" +
+      "Compression presets: none (raw PNG), low (2048px/q85), medium (1280px/q70, DEFAULT), high (800px/q50).",
     {
       serial: z.string().optional().describe("Device serial (omit if only one device connected)"),
+      compression: compressionSchema,
+      maxWidth: maxWidthSchema,
+      quality: qualitySchema,
+      format: formatSchema,
     },
-    async ({ serial }) => {
+    async ({ serial, compression, maxWidth, quality, format }) => {
       const filePath = tempPath("png");
       try {
         const s = serial ? `-s "${serial}" ` : "";
         await execAsync(`adb ${s}exec-out screencap -p > "${filePath}"`);
-        const imageData = await readFile(filePath);
-        const base64 = imageData.toString("base64");
+        const opts = resolveCompression({ compression, maxWidth, quality, format });
+        const { data, mimeType } = await compressImage(filePath, opts);
+        const base64 = data.toString("base64");
         await unlink(filePath).catch(() => {});
-        return { content: [{ type: "image", data: base64, mimeType: "image/png" }] };
+        return { content: [{ type: "image", data: base64, mimeType }] };
       } catch (err) {
         await unlink(filePath).catch(() => {});
         return { content: [{ type: "text", text: `emu_screenshot failed: ${err.message}` }] };

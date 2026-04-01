@@ -6,7 +6,26 @@ MCP server for native macOS desktop automation — screen, mouse, keyboard, wind
 
 No Docker. No virtual display. Controls your actual Mac desktop. AI operates in the background or the foreground — you choose.
 
-## What's New in v3.0
+## What's New in v3.1
+
+**Smart screenshot compression** — screenshots are now compressed by default to prevent API "Input too long" errors on high-DPI displays (Retina, 4K).
+
+| Preset | Max Width | Quality | Format | Typical Size |
+|--------|-----------|---------|--------|-------------|
+| `none` | original | 100 | PNG | 4-15 MB |
+| `low` | 2048 px | 85 | JPEG | 300-500 KB |
+| `medium` | 1280 px | 70 | JPEG | 100-400 KB |
+| `high` | 800 px | 50 | JPEG | 30-150 KB |
+
+Default is `medium`. Agent picks the level based on the task — or uses `none` for pixel-perfect work.
+
+**Tile mode** — when full resolution is needed, split a screenshot into a grid. Agent fetches tiles one at a time, each small enough for the API.
+
+New tool: `screenshot_tile` — fetch individual tiles from a tiled screenshot.
+
+Compression also works on `sim_screenshot` and `emu_screenshot`.
+
+### v3.0
 
 Two operation modes. 30 tools (up from 13). Optional iOS/Android simulator control.
 
@@ -40,7 +59,7 @@ Grant **Accessibility permission** to your terminal: System Settings → Privacy
 
 All original v2 capabilities, unchanged.
 
-- **Screen capture** — full screen, region, or specific display
+- **Screen capture** — full screen, region, or specific display; with compression presets and tile mode
 - **Mouse** — click (left/right/double/triple), move, drag, scroll, with modifier keys
 - **Keyboard** — three typing modes (keystroke, cliclick, direct IME bypass), any key combo via AppleScript key codes
 - **Window management** — list windows, focus by app/title, open apps
@@ -119,6 +138,42 @@ Clicks at position (100, 200) relative to the Safari window titled "GitHub". No 
 ```
 
 Types into Notes via clipboard paste (CGEvent Cmd+V). Clipboard is saved and restored.
+
+### Compressed screenshot (default behavior in v3.1)
+
+```json
+{ "target": { "app": "Chrome" } }
+```
+
+Returns a 1280px-wide JPEG (~150KB) instead of a raw PNG (~5MB). Works out of the box.
+
+### High-res screenshot with no compression
+
+```json
+{ "target": { "app": "Chrome" }, "compression": "none" }
+```
+
+Returns the raw PNG — same as v3.0 behavior.
+
+### Custom compression
+
+```json
+{ "target": { "app": "Chrome" }, "compression": "low", "maxWidth": 1920, "quality": 90 }
+```
+
+Explicit `maxWidth`/`quality`/`format` override the preset values.
+
+### Tile mode for full-resolution inspection
+
+```json
+{ "target": { "app": "Chrome" }, "tile": { "rows": 2, "cols": 2 } }
+```
+
+Returns a manifest with tile metadata. Then fetch individual tiles:
+
+```json
+{ "id": "tiles-1711929600000-abc123", "index": 0, "compression": "medium" }
+```
 
 ### Focus-safe foreground operation
 
